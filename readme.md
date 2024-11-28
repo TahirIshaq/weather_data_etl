@@ -76,6 +76,7 @@ SELECT * FROM weather_data;
 - [HTTP Connection](https://airflow.apache.org/docs/apache-airflow-providers-http/stable/connections/http.html)
 - [SQLExecuteQueryOperator dynamic input](https://arthurpedroti.com.br/how-to-create-your-first-etl-in-apache-airflow/)
 - [SQLExecuteQueryOperator output](https://www.astronomer.io/blog/apache-airflow-taskflow-api-vs-traditional-operators/)
+- [Airflow task groups](https://www.astronomer.io/docs/learn/task-groups/)
 - [How to build and automate a python ETL pipeline with airflow on AWS EC2](https://www.youtube.com/watch?v=uhQ54Dgp6To)
 - [Apache Airflow One Shot- Building End To End ETL Pipeline Using AirFlow And Astro](https://www.youtube.com/watch?v=Y_vQyMljDsE)
 - [repo 1](https://github.com/YemiOla/data_engineering_project_openweathermap_api_airflow_etl_aws)

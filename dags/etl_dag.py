@@ -2,10 +2,11 @@ import os
 import json
 import pandas as pd
 from datetime import datetime
-from airflow.decorators import dag, task
+from airflow.decorators import dag, task, task_group
 from airflow.providers.http.sensors.http import HttpSensor
 from airflow.providers.http.operators.http import SimpleHttpOperator
 from airflow.providers.amazon.aws.operators.s3 import S3CreateBucketOperator
+from airflow.providers.amazon.aws.transfers.sql_to_s3 import SqlToS3Operator
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.amazon.aws.transfers.local_to_s3 import LocalFilesystemToS3Operator
 
@@ -49,7 +50,6 @@ def elt_weather_data():
         log_response = True
     )
 
-
     @task(task_id="compose_data")
     def compose_data(data):
         """Compose the raw weather data"""
@@ -57,124 +57,115 @@ def elt_weather_data():
         df.columns = data["current_weather"].keys()
         df[["latitude", "longitude"]] = data["latitude"] , data["longitude"]
         #print(pd.io.sql.get_schema(df, name="weather_data"))
-        df.to_csv(f"{BASE_PATH}/weather_data.csv")
+        #df.to_csv(f"{BASE_PATH}/weather_data.csv")
         return df
     
-    # Create weather data table in database
-    create_table = SQLExecuteQueryOperator(
-        task_id = "create_table",
-        conn_id = PG_DB_CONN_ID,
-        sql = """
-            CREATE TABLE IF NOT EXISTS weather_data (
-                "latitude" REAL, 
-                "longitude" REAL,
-                "time" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                "interval" INTEGER,
-                "temperature" REAL,
-                "windspeed" REAL,
-                "winddirection" INTEGER,
-                "is_day" INTEGER,
-                "weathercode" INTEGER
-            )
-        """
-    )
+    @task_group(group_id='create_storage_resources')
+    def create_storage_resources():
+        # Create weather data table in database
+        create_table = SQLExecuteQueryOperator(
+            task_id = "create_table",
+            conn_id = PG_DB_CONN_ID,
+            sql = """
+                CREATE TABLE IF NOT EXISTS weather_data (
+                    "id" SERIAL,
+                    "latitude" REAL, 
+                    "longitude" REAL,
+                    "time" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    "interval" INTEGER,
+                    "temperature" REAL,
+                    "windspeed" REAL,
+                    "winddirection" INTEGER,
+                    "is_day" INTEGER,
+                    "weathercode" INTEGER
+                )
+            """
+        )
 
+        create_bucket = S3CreateBucketOperator(
+            aws_conn_id=AWS_CONN_ID,
+            task_id="create_bucket",
+            bucket_name=S3_BUCKET,
+        )
 
-    # @task(task_id="check_task_output")
-    # def check_task_output(data):
-    #     print(f"The output of the previous task is: {data}")
+        create_table >> create_bucket
 
-
-    # test_task_output = check_task_output(raw_data_print)
-
-    # This string formatting worked
-    # update_data = SQLExecuteQueryOperator(
-    #     task_id = "update_data",
-    #     conn_id = PG_DB_CONN_ID,
-    #     sql = """
-    #     INSERT INTO weather_data ("time") 
-    #     VALUES(%(time)s)
-    #     """,
-    #     parameters = {"time": 1}
-    # )
-
-    # This also works
-    # update_data = SQLExecuteQueryOperator(
-    #     task_id = "update_data",
-    #     conn_id = PG_DB_CONN_ID,
-    #     sql = """
-    #     INSERT INTO weather_data ("time") 
-    #     VALUES(%(time)s)
-    #     """,
-    #     parameters = {"time": LATITUDE}
-    # )
 
     get_raw_data = get_weather_data
-    raw_data_print = compose_data(get_raw_data.output)
+    compose_weather_data = compose_data(get_raw_data.output)
 
-    # Update weather table
-    update_data = SQLExecuteQueryOperator(
-        task_id = "update_data",
-        conn_id = PG_DB_CONN_ID,
-        sql = """
-            INSERT INTO weather_data (
-                "latitude", 
-                "longitude", 
-                "time", 
-                "interval", 
-                "temperature", 
-                "windspeed", 
-                "winddirection", 
-                "is_day", 
-                "weathercode"
-            ) 
-            VALUES(
-                %(latitude)s, 
-                %(longitude)s, 
-                %(time)s, 
-                %(interval)s, 
-                %(temperature)s, 
-                %(windspeed)s, 
-                %(winddirection)s, 
-                %(is_day)s, 
-                %(weathercode)s
-            )
-        """,
-        parameters = { 
-            "latitude": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['latitude'][0] }}",
-            "longitude": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['longitude'][0] }}",
-            "time": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['time'][0] }}",
-            "interval": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['interval'][0] }}",
-            "temperature": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['temperature'][0] }}",
-            "windspeed": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['windspeed'][0] }}",
-            "winddirection": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['winddirection'][0] }}",
-            "is_day": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['is_day'][0] }}",
-            "weathercode": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['weathercode'][0] }}",
-        }
-    )
+    @task_group(group_id="update_resources")
+    def update_resources():
+        # Update weather table
+        update_db = SQLExecuteQueryOperator(
+            task_id = "update_db",
+            conn_id = PG_DB_CONN_ID,
+            sql = """
+                INSERT INTO weather_data (
+                    "latitude", 
+                    "longitude", 
+                    "time", 
+                    "interval", 
+                    "temperature", 
+                    "windspeed", 
+                    "winddirection", 
+                    "is_day", 
+                    "weathercode"
+                ) 
+                VALUES(
+                    %(latitude)s, 
+                    %(longitude)s, 
+                    %(time)s, 
+                    %(interval)s, 
+                    %(temperature)s, 
+                    %(windspeed)s, 
+                    %(winddirection)s, 
+                    %(is_day)s, 
+                    %(weathercode)s
+                )
+            """,
+            parameters = { 
+                "latitude": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['latitude'][0] }}",
+                "longitude": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['longitude'][0] }}",
+                "time": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['time'][0] }}",
+                "interval": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['interval'][0] }}",
+                "temperature": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['temperature'][0] }}",
+                "windspeed": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['windspeed'][0] }}",
+                "winddirection": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['winddirection'][0] }}",
+                "is_day": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['is_day'][0] }}",
+                "weathercode": "{{ ti.xcom_pull(task_ids=['compose_data'], key='return_value')[0]['weathercode'][0] }}",
+            }
+        )
 
-    create_bucket = S3CreateBucketOperator(
-        aws_conn_id=AWS_CONN_ID,
-        task_id="create_bucket",
-        bucket_name=S3_BUCKET,
-    )
+        # update_s3 = LocalFilesystemToS3Operator(
+        #     task_id = "update_s3",
+        #     aws_conn_id=AWS_CONN_ID,
+        #     filename=f"{BASE_PATH}/weather_data.csv",
+        #     dest_key="weather_data.csv",
+        #     dest_bucket=S3_BUCKET,
+        #     replace=True
+        # )
 
-    upload_to_s3 = LocalFilesystemToS3Operator(
-        task_id = "upload_to_s3",
-        aws_conn_id=AWS_CONN_ID,
-        filename=f"{BASE_PATH}/weather_data.csv",
-        dest_key="weather_data.csv",
-        dest_bucket=S3_BUCKET,
-        replace=True
-    )
+        sql_to_s3_task = SqlToS3Operator(
+            task_id="sql_to_s3_task",
+            sql_conn_id=PG_DB_CONN_ID,
+            aws_conn_id=AWS_CONN_ID,
+            query="SELECT * FROM weather_data;",
+            s3_bucket=S3_BUCKET,
+            s3_key="weather_data_test.csv",
+            replace=True,
+        )
 
-    @task(task_id="clean_up")
-    def clean_up():
-        """Remove any saved files"""
-        os.remove(f"{BASE_PATH}/weather_data.csv")
+        update_db >> sql_to_s3_task
+
+    # @task(task_id="clean_up")
+    # def clean_up():
+    #     """Remove any saved files"""
+    #     os.remove(f"{BASE_PATH}/weather_data.csv")
 
 
-    is_weather_api_ready >> get_raw_data >> raw_data_print >> create_table >> create_bucket >> update_data >> upload_to_s3 >> clean_up()
+    #is_weather_api_ready >> get_composed_data >> create_storage_resources() >> update_resources() >> clean_up()
+    is_weather_api_ready >> get_weather_data >> compose_weather_data >> create_storage_resources() >> update_resources()
 
 
 dag1 = elt_weather_data()
